@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: enginewatch
+      POSTGRES_PASSWORD: enginewatch
+      POSTGRES_DB: enginewatch
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U enginewatch"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      EW_DATABASE_URL: postgresql+psycopg://enginewatch:enginewatch@db:5432/enginewatch
+      EW_RUL_MODEL_PATH: /app/models/rul_baseline.joblib
+    volumes:
+      - ./models:/app/models:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Optional: `docker compose --profile demo up` replays synthetic engines into the API.
+  simulator:
+    build: .
+    profiles: ["demo"]
+    command: ["enginewatch", "simulate", "--synthetic", "--units", "5", "--rate", "25", "--api", "http://api:8000"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
