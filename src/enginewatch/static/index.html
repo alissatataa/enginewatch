@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EngineWatch</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2333; --muted:#6b7280; --line:#e5e7eb;
+          --ok:#1a7f4b; --warning:#b7791f; --critical:#c0362c; --unknown:#6b7280; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1420; --card:#171d2c; --text:#e6e9f0; --muted:#8b93a7; --line:#262e42;
+            --ok:#4ade80; --warning:#fbbf24; --critical:#f87171; --unknown:#8b93a7; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; }
+  h1 { font-size:18px; margin:0; }
+  #conn { font-size:12px; color:var(--muted); }
+  main { display:grid; grid-template-columns: 2fr 1fr; gap:16px; padding:0 20px 20px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 10px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover, tr.sel { background:rgba(127,127,127,.12); }
+  .badge { padding:2px 8px; border-radius:999px; font-size:12px; color:#fff; }
+  .ok { background:var(--ok); } .warning { background:var(--warning); }
+  .critical { background:var(--critical); } .unknown { background:var(--unknown); }
+  #alerts { list-style:none; margin:0; padding:0; max-height:300px; overflow:auto; }
+  #alerts li { padding:6px 0; border-bottom:1px solid var(--line); }
+  #chart { width:100%; height:180px; }
+  .muted { color:var(--muted); }
+</style>
+</head>
+<body>
+<header><h1>EngineWatch</h1><span id="conn">connecting...</span></header>
+<main>
+  <section>
+    <h2>Fleet (lowest RUL first)</h2>
+    <table>
+      <thead><tr><th>Engine</th><th>Cycle</th><th>Est. RUL</th><th>Status</th></tr></thead>
+      <tbody id="fleet"></tbody>
+    </table>
+    <p id="empty" class="muted" hidden>No engines yet. Run <code>enginewatch simulate --synthetic</code>.</p>
+  </section>
+  <div style="display:grid; gap:16px; align-content:start">
+    <section>
+      <h2 id="chart-title">Select an engine</h2>
+      <svg id="chart" viewBox="0 0 400 180" preserveAspectRatio="none"></svg>
+    </section>
+    <section>
+      <h2>Alerts</h2>
+      <ul id="alerts"></ul>
+    </section>
+  </div>
+</main>
+<script>
+const engines = new Map();
+let selected = null, renderTimer = null;
+const $ = (id) => document.getElementById(id);
+
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text !== undefined) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => { renderTimer = null; render(); }, 150);
+}
+
+function render() {
+  const body = $("fleet");
+  body.replaceChildren();
+  const list = [...engines.values()].sort((a, b) => (a.rul ?? 1e9) - (b.rul ?? 1e9));
+  $("empty").hidden = list.length > 0;
+  for (const e of list) {
+    const tr = el("tr");
+    if (e.engine_id === selected) tr.className = "sel";
+    tr.append(el("td", "#" + e.engine_id), el("td", e.cycle),
+              el("td", e.rul == null ? "n/a" : e.rul.toFixed(0)));
+    const td = el("td"); td.append(el("span", e.status, "badge " + e.status)); tr.append(td);
+    tr.onclick = () => select(e.engine_id);
+    body.append(tr);
+  }
+}
+
+async function select(id) {
+  selected = id;
+  render();
+  await drawHistory();
+}
+
+async function drawHistory() {
+  if (selected == null) return;
+  const res = await fetch(`/engines/${selected}/history`);
+  if (!res.ok) return;
+  const pts = (await res.json()).filter((p) => p.rul != null);
+  $("chart-title").textContent = `Engine #${selected} - estimated RUL`;
+  const svg = $("chart");
+  svg.replaceChildren();
+  if (pts.length < 2) return;
+  const maxC = pts[pts.length - 1].cycle, minC = pts[0].cycle;
+  const maxR = Math.max(...pts.map((p) => p.rul), 1);
+  const x = (c) => ((c - minC) / Math.max(maxC - minC, 1)) * 390 + 5;
+  const y = (r) => 175 - (r / maxR) * 165;
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  line.setAttribute("points", pts.map((p) => `${x(p.cycle)},${y(p.rul)}`).join(" "));
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", "currentColor");
+  line.setAttribute("stroke-width", "2");
+  svg.append(line);
+}
+
+function addAlert(a) {
+  const li = el("li");
+  li.append(el("span", a.level, "badge " + a.level), document.createTextNode(
+    ` Engine #${a.engine_id} @ cycle ${a.cycle}: ${a.message}`));
+  $("alerts").prepend(li);
+}
+
+async function init() {
+  const [fleet, alerts] = await Promise.all([
+    fetch("/engines").then((r) => r.json()), fetch("/alerts?limit=30").then((r) => r.json())]);
+  fleet.forEach((e) => engines.set(e.engine_id, e));
+  alerts.reverse().forEach(addAlert);
+  render();
+
+  const es = new EventSource("/stream");
+  es.onopen = () => ($("conn").textContent = "live");
+  es.onerror = () => ($("conn").textContent = "reconnecting...");
+  es.onmessage = (msg) => {
+    const ev = JSON.parse(msg.data);
+    if (ev.type === "reading") {
+      engines.set(ev.engine_id, { engine_id: ev.engine_id, cycle: ev.cycle, rul: ev.rul, status: ev.status });
+      scheduleRender();
+      if (ev.engine_id === selected && ev.cycle % 5 === 0) drawHistory();
+    } else if (ev.type === "alert") addAlert(ev);
+  };
+}
+init();
+</script>
+</body>
+</html>
